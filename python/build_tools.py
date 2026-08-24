@@ -16,10 +16,17 @@ terraform output and the invoking project's "wrench" package.json config):
   WRENCH_CF_DISTRIBUTION - CloudFront distribution ID
   WRENCH_DISPLAY_NAME   - name shown on the promote page (default: "App")
   WRENCH_ACCENT_COLOR   - spinner accent color hex (default: "#569cd6")
+  WRENCH_PROJECT_NAME   - stable slug (package.json "name"), used as the
+                          manifest.json key in the registry bucket
+  WRENCH_SUBDOMAIN      - this site's subdomain label ("" for apex); blank
+                          means "not migrated to custom domains yet"
+  WRENCH_ROOT_DOMAIN    - root domain sites are published under
+  WRENCH_REGISTRY_BUCKET - S3 bucket holding the shared manifest.json for the
+                          landing page; blank skips the registry update
   AWS_REGION            - AWS region (default: us-west-1)
 
 Requirements:
-  pip install boto3
+  pip install -r requirements.txt
   AWS credentials configured (aws configure or env vars)
 """
 
@@ -33,12 +40,16 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
-import boto3
-from botocore.exceptions import ClientError
+try:
+    import boto3
+    from botocore.exceptions import ClientError, NoCredentialsError
+except ModuleNotFoundError:
+    sys.exit("boto3 is required — pip install boto3")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +74,10 @@ CLOUDFRONT_ID = os.environ.get("WRENCH_CF_DISTRIBUTION", "")
 AWS_REGION = os.environ.get("AWS_REGION", "us-west-1")
 DISPLAY_NAME = os.environ.get("WRENCH_DISPLAY_NAME", "App")
 ACCENT_COLOR = os.environ.get("WRENCH_ACCENT_COLOR", "#569cd6")
+PROJECT_NAME = os.environ.get("WRENCH_PROJECT_NAME", "")
+SUBDOMAIN = os.environ.get("WRENCH_SUBDOMAIN", "")
+ROOT_DOMAIN = os.environ.get("WRENCH_ROOT_DOMAIN", "")
+REGISTRY_BUCKET = os.environ.get("WRENCH_REGISTRY_BUCKET", "")
 S3_VERSION_PREFIX = "versions/"
 THREADS = 8
 
@@ -384,6 +399,24 @@ def promote_version(version: str) -> Dict:
         logger.error("Failed to upload root index.html: %s", e)
         raise
 
+    # Mirror the promoted version's favicon to the bucket root (unversioned)
+    # so "https://<site>/favicon.svg" always resolves — bucket root otherwise
+    # only ever holds this iframe-wrapper index.html, not any real assets.
+    try:
+        s3_client.copy_object(
+            Bucket=BUCKET,
+            Key="favicon.svg",
+            CopySource={"Bucket": BUCKET, "Key": f"{version_prefix}favicon.svg"},
+            ContentType="image/svg+xml",
+            MetadataDirective="REPLACE",
+        )
+        logger.info("Mirrored favicon.svg from v%s to bucket root", version)
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+            logger.info("No favicon.svg in v%s; skipping root mirror", version)
+        else:
+            raise
+
     invalidation_id = None
     if CLOUDFRONT_ID:
         cf = boto3.client("cloudfront", region_name=AWS_REGION)
@@ -396,7 +429,7 @@ def promote_version(version: str) -> Dict:
             resp = cf.create_invalidation(
                 DistributionId=CLOUDFRONT_ID,
                 InvalidationBatch={
-                    "Paths": {"Quantity": 1, "Items": ["/index.html"]},
+                    "Paths": {"Quantity": 2, "Items": ["/index.html", "/favicon.svg"]},
                     "CallerReference": caller_ref,
                 },
             )
@@ -406,6 +439,8 @@ def promote_version(version: str) -> Dict:
             logger.error("CloudFront invalidation failed: %s", e)
             raise
 
+    upsert_registry_entry(version)
+
     return {
         "status": "promoted",
         "bucket": BUCKET,
@@ -413,6 +448,61 @@ def promote_version(version: str) -> Dict:
         "version_url": version_url,
         "cloudfront_invalidation_id": invalidation_id,
     }
+
+
+def _site_url() -> str:
+    fqdn = ROOT_DOMAIN if SUBDOMAIN == "" else f"{SUBDOMAIN}.{ROOT_DOMAIN}"
+    return f"https://{fqdn}/"
+
+
+def upsert_registry_entry(version: str) -> None:
+    """
+    Upsert this site's entry into the shared manifest.json that the landing
+    page reads. No-op (with a log line) if the registry bucket or subdomain
+    aren't configured — keeps this safe to call for sites not yet migrated
+    to custom domains, and for the registry bucket's own bootstrap deploy
+    before WRENCH_REGISTRY_BUCKET is known.
+
+    This is a read-modify-write against a single S3 object; concurrent
+    promotes across sites can race and clobber each other's update. Accepted
+    for a single-operator deploy pipeline — not worth a locking scheme.
+    """
+    if not REGISTRY_BUCKET or not PROJECT_NAME:
+        logger.info("Registry bucket/project name not configured; skipping manifest update.")
+        return
+
+    registry_client = boto3.client("s3", region_name=AWS_REGION)
+
+    try:
+        resp = registry_client.get_object(Bucket=REGISTRY_BUCKET, Key="manifest.json")
+        manifest = json.loads(resp["Body"].read())
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "NoSuchKey":
+            manifest = {"sites": {}}
+        else:
+            raise
+
+    site_url = _site_url()
+    manifest.setdefault("sites", {})[PROJECT_NAME] = {
+        "name": PROJECT_NAME,
+        "displayName": DISPLAY_NAME,
+        "accentColor": ACCENT_COLOR,
+        "subdomain": SUBDOMAIN,
+        "url": site_url,
+        "faviconUrl": f"{site_url}favicon.svg",
+        "version": version,
+        "versions": list_versions(),
+        "promotedAt": datetime.datetime.now(datetime.UTC).isoformat(),
+    }
+
+    registry_client.put_object(
+        Bucket=REGISTRY_BUCKET,
+        Key="manifest.json",
+        Body=json.dumps(manifest, indent=2).encode("utf-8"),
+        ContentType="application/json",
+        CacheControl="no-cache, max-age=0, must-revalidate",
+    )
+    logger.info("Updated manifest.json in registry bucket %s for site '%s'", REGISTRY_BUCKET, PROJECT_NAME)
 
 
 if __name__ == "__main__":
@@ -439,21 +529,26 @@ if __name__ == "__main__":
     args = parser.parse_args()
     _add_file_log()
 
-    if args.cmd == "build":
-        build_local(clean=args.clean)
+    try:
+        if args.cmd == "build":
+            build_local(clean=args.clean)
 
-    elif args.cmd == "deploy":
-        v = args.version or get_version()
-        build_local(clean=args.clean)
-        build_and_upload(version=v, _build=False, force=args.force)
-        promote_version(v)
+        elif args.cmd == "deploy":
+            v = args.version or get_version()
+            build_local(clean=args.clean)
+            build_and_upload(version=v, _build=False, force=args.force)
+            promote_version(v)
 
-    elif args.cmd == "upload":
-        build_and_upload(version=args.version, _build=False, force=args.force)
+        elif args.cmd == "upload":
+            build_and_upload(version=args.version, _build=False, force=args.force)
 
-    elif args.cmd == "promote":
-        promote_version(args.version or get_version())
+        elif args.cmd == "promote":
+            promote_version(args.version or get_version())
 
-    elif args.cmd == "list":
-        versions = list_versions()
-        print("\n".join(versions) if versions else "(no versions deployed)")
+        elif args.cmd == "list":
+            versions = list_versions()
+            print("\n".join(versions) if versions else "(no versions deployed)")
+    except NoCredentialsError:
+        sys.exit("No AWS credentials found — configure them: aws configure")
+    except Exception as e:
+        sys.exit(str(e))

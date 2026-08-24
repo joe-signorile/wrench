@@ -1,9 +1,14 @@
 {
   "name": "wrench",
   "version": "0.1.0",
+  "description": "Personal build/deploy CLI for Vite+Svelte+TS static SPAs on AWS S3+CloudFront, provisioned by Terraform.",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "wrench": "./bin/wrench.mjs"
+  },
+  "engines": {
+    "node": ">=18"
   }
 }

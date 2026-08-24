@@ -5,9 +5,23 @@ export function versionPath(projectRoot) {
   return join(projectRoot, 'version.json');
 }
 
-export function readVersion(projectRoot) {
-  const v = JSON.parse(readFileSync(versionPath(projectRoot), 'utf8'));
+function parseVersionFile(path) {
+  let v;
+  try {
+    v = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (err) {
+    throw new Error(`Failed to parse ${path}: ${err.message}`);
+  }
+  for (const key of ['major', 'minor', 'patch']) {
+    if (typeof v[key] !== 'number') {
+      throw new Error(`${path} is missing a numeric "${key}" field.`);
+    }
+  }
   return v;
+}
+
+export function readVersion(projectRoot) {
+  return parseVersionFile(versionPath(projectRoot));
 }
 
 export function formatVersion(v) {
@@ -16,7 +30,7 @@ export function formatVersion(v) {
 
 export function bumpVersion(projectRoot) {
   const path = versionPath(projectRoot);
-  const v = JSON.parse(readFileSync(path, 'utf8'));
+  const v = parseVersionFile(path);
 
   v.patch += 1;
   if (v.patch >= 100) { v.patch = 0; v.minor += 1; }

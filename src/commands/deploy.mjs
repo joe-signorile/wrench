@@ -2,7 +2,10 @@ import { join } from 'node:path';
 import { loadProject, wrenchRoot } from '../context.mjs';
 import { bumpVersion, formatVersion } from '../lib/version-file.mjs';
 import { run, runCapture } from '../lib/run.mjs';
+import { loadWrenchConfig } from '../lib/wrench-config.mjs';
 import { build } from './build.mjs';
+
+const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 function parseFlags(args) {
   const flags = { force: false, clean: false, version: null };
@@ -10,6 +13,9 @@ function parseFlags(args) {
     if (args[i] === '--force') flags.force = true;
     else if (args[i] === '--clean') flags.clean = true;
     else if (args[i] === '--version') flags.version = args[++i];
+  }
+  if (flags.version && !SEMVER_RE.test(flags.version)) {
+    throw new Error(`--version "${flags.version}" isn't strict SemVer (X.Y.Z).`);
   }
   return flags;
 }
@@ -34,6 +40,7 @@ export async function deploy(args) {
   const bucket = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'bucket_name']);
   const distribution = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'cloudfront_distribution_id']);
 
+  const wrenchConfig = loadWrenchConfig();
   const env = {
     ...process.env,
     WRENCH_PROJECT_ROOT: project.root,
@@ -41,6 +48,10 @@ export async function deploy(args) {
     WRENCH_CF_DISTRIBUTION: distribution,
     WRENCH_DISPLAY_NAME: project.displayName,
     WRENCH_ACCENT_COLOR: project.accentColor,
+    WRENCH_PROJECT_NAME: project.name || '',
+    WRENCH_SUBDOMAIN: project.subdomain ?? '',
+    WRENCH_ROOT_DOMAIN: wrenchConfig.rootDomain || '',
+    WRENCH_REGISTRY_BUCKET: wrenchConfig.registryBucket || '',
   };
 
   const buildTools = join(wrenchRoot, 'python', 'build_tools.py');

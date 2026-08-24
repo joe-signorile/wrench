@@ -9,7 +9,12 @@ export function loadProject(cwd = process.cwd()) {
   if (!existsSync(packageJsonPath)) {
     throw new Error(`No package.json found in ${cwd}. Run wrench from a project's root directory.`);
   }
-  const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+  let pkg;
+  try {
+    pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+  } catch (err) {
+    throw new Error(`Failed to parse package.json in ${cwd}: ${err.message}`);
+  }
   const config = pkg.wrench || {};
 
   if (!existsSync(join(cwd, 'version.json'))) {
@@ -18,8 +23,10 @@ export function loadProject(cwd = process.cwd()) {
 
   return {
     root: cwd,
+    name: pkg.name,
     displayName: config.displayName || pkg.name || 'App',
     accentColor: config.accentColor || '#569cd6',
     distBudgetMb: config.distBudgetMb ?? null,
+    subdomain: config.subdomain ?? null,
   };
 }

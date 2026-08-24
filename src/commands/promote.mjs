@@ -2,11 +2,18 @@ import { join } from 'node:path';
 import { loadProject, wrenchRoot } from '../context.mjs';
 import { readVersion, formatVersion } from '../lib/version-file.mjs';
 import { run, runCapture } from '../lib/run.mjs';
+import { loadWrenchConfig } from '../lib/wrench-config.mjs';
 
 async function deployEnv(project) {
   const infraDir = join(project.root, 'infra');
-  const bucket = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'bucket_name']);
-  const distribution = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'cloudfront_distribution_id']);
+  let bucket, distribution;
+  try {
+    bucket = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'bucket_name']);
+    distribution = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'cloudfront_distribution_id']);
+  } catch (err) {
+    throw new Error(`${err.message}\nRun 'wrench infra apply' first.`);
+  }
+  const wrenchConfig = loadWrenchConfig();
   return {
     ...process.env,
     WRENCH_PROJECT_ROOT: project.root,
@@ -14,6 +21,10 @@ async function deployEnv(project) {
     WRENCH_CF_DISTRIBUTION: distribution,
     WRENCH_DISPLAY_NAME: project.displayName,
     WRENCH_ACCENT_COLOR: project.accentColor,
+    WRENCH_PROJECT_NAME: project.name || '',
+    WRENCH_SUBDOMAIN: project.subdomain ?? '',
+    WRENCH_ROOT_DOMAIN: wrenchConfig.rootDomain || '',
+    WRENCH_REGISTRY_BUCKET: wrenchConfig.registryBucket || '',
   };
 }
 

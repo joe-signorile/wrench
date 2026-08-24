@@ -1,0 +1,4 @@
+{
+  "rootDomain": "example.com",
+  "registryBucket": "your-registry-bucket-name"
+}

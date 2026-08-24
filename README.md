@@ -1,0 +1,209 @@
+# wrench
+
+![wrench icon](./icon.png)
+
+My personal build/deploy CLI for static SPAs (Vite + Svelte + TypeScript) on
+AWS S3 + CloudFront, provisioned by Terraform. It is not a generic tool — it
+assumes this exact stack, this exact directory layout, and my AWS account
+conventions. If that's your stack too, it'll work for you as-is.
+
+## Requirements
+
+- Node (whatever version your project's `.nvmrc` says)
+- [Terraform](https://developer.hashicorp.com/terraform/install)
+- Python 3 with `boto3` (`pip install -r requirements.txt`)
+- AWS credentials configured (`aws configure`, or the usual env vars)
+
+## Install
+
+Clone this repo as a **sibling directory** to any project that will use it —
+that's not optional, it's load-bearing. Every wrench-managed project's
+`infra/main.tf` points at the shared Terraform module by relative path:
+`../../wrench/infra-module`. If `wrench` isn't a sibling of your project
+directory, that path breaks.
+
+```
+projects/
+  wrench/          <- this repo
+  your-project/
+  another-project/
+```
+
+Then:
+
+```sh
+cd wrench
+npm link
+```
+
+`wrench` is now on your `$PATH` globally (as long as your Node install's
+global bin dir is on `$PATH` — true by default under nvm).
+
+Copy `wrench.config.example.json` to `wrench.config.json` (gitignored) and
+fill in your own values:
+
+```sh
+cp wrench.config.example.json wrench.config.json
+```
+
+- `rootDomain` — the domain your sites are published under (e.g. a project
+  deploys to `<subdomain>.<rootDomain>`).
+- `registryBucket` — the S3 bucket holding the shared `manifest.json` that
+  tracks every wrench-deployed project.
+
+## How `wrench` decides what to do
+
+Run `wrench` (with or without a subcommand) from inside any directory:
+
+1. **If that directory has its own `build.sh`**, wrench execs it directly —
+   full passthrough, whatever args you typed after `wrench` get forwarded.
+   This is the compatibility path for any project that predates wrench and
+   still uses the old copy-pasted `build.sh` + `infra/build_tools.py`
+   convention. Nothing about that script's contents is inspected; it just
+   runs.
+2. **Otherwise**, wrench prints `No build.sh found in <dir>.` and — if
+   you're at an interactive terminal — asks
+   `Check for an npm-based wrench project instead? [Y/n]`. Answering no (or
+   piping/CI input, which skips the prompt and proceeds automatically)
+   either exits cleanly or falls through to wrench's own pipeline, which
+   requires the project to have `package.json` and `version.json` (see
+   below).
+
+In short: `wrench` works in *any* directory on the machine. What it does
+once there depends on what it finds.
+
+## Setting up a new wrench-native project
+
+A project is "wrench-native" once it has:
+
+**`infra/main.tf`** — a thin wrapper around the shared module:
+
+```hcl
+terraform {
+  required_version = ">= 1.5"
+  required_providers {
+    aws    = { source = "hashicorp/aws",    version = "~> 5.0" }
+    random = { source = "hashicorp/random", version = "~> 3.0" }
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+}
+
+module "static_site" {
+  source       = "../../wrench/infra-module"
+  project_name = var.project_name
+}
+```
+
+**`infra/variables.tf`**:
+
+```hcl
+variable "project_name" {
+  type    = string
+  default = "your-project"
+}
+
+variable "aws_region" {
+  type    = string
+  default = "us-west-1"
+}
+```
+
+**`infra/outputs.tf`** — re-export the module's outputs (the exact names
+`wrench` reads via `terraform output`):
+
+```hcl
+output "bucket_name"                { value = module.static_site.bucket_name }
+output "cloudfront_distribution_id" { value = module.static_site.cloudfront_distribution_id }
+output "cloudfront_domain"          { value = module.static_site.cloudfront_domain }
+```
+
+**`version.json`** at the project root — the single source of truth for the
+deployed version, bumped automatically by `wrench dev`/`wrench deploy`:
+
+```json
+{"major":0,"minor":0,"patch":0}
+```
+
+**`package.json`** — an optional `"wrench"` key for cosmetics on the promote
+page, plus `test`/`build` npm scripts wrench shells out to:
+
+```json
+{
+  "scripts": {
+    "test": "node --test 'src/tests/**/*.test.ts'",
+    "build": "tsc --noEmit && vite build"
+  },
+  "wrench": {
+    "displayName": "Your Project",
+    "accentColor": "#569cd6",
+    "distBudgetMb": 15
+  }
+}
+```
+
+Your `vite.config.ts` should use a relative `base: './'` — the whole
+versioned-deploy scheme depends on the build resolving identically whether
+it's served from the bucket root or nested under `/versions/<version>/`.
+
+Then, once:
+
+```sh
+wrench infra apply
+```
+
+And from then on:
+
+```sh
+wrench deploy
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `wrench` *(no subcommand)* | Same as `wrench deploy` — build and deploy in one step |
+| `wrench dev` | Bump version, run tests (non-blocking), start Vite |
+| `wrench build [--clean]` | `npm run build`, verify `dist/index.html`, advisory dist-size budget check |
+| `wrench test` | `npm test` |
+| `wrench deploy [--force] [--clean] [--version X.Y.Z]` | Bump version, build, `terraform apply` (idempotent), upload to S3, promote |
+| `wrench infra plan\|apply\|output [args...]` | Run Terraform against `infra/` directly, without a full deploy |
+| `wrench promote [version]` | Promote an already-uploaded version without rebuilding |
+| `wrench list` | List every version currently in S3 |
+| `wrench version [bump]` | Show or bump `version.json` |
+| `wrench --version` / `-v` | wrench's own version |
+| `wrench --help` / `-h` | Usage |
+
+## How deploys work
+
+Every deploy uploads the full `dist/` build to
+`s3://<bucket>/versions/<semver>/`, immutable and content-hashed — nothing
+already-deployed is ever overwritten. "Promoting" a version writes a small
+loading-overlay page (spinner + `<iframe src="/versions/<version>/index.html">`)
+to the bucket root and fires a targeted CloudFront invalidation for
+`/index.html` only. The root page is served `no-cache`; everything under
+`versions/` is `immutable`.
+
+Rollback is re-promoting an older version — no rebuild, no re-upload:
+
+```sh
+wrench promote 1.2.3
+```
+
+## Repo layout
+
+```
+wrench/
+├── bin/wrench.mjs         entrypoint: detection chain + subcommand dispatch
+├── src/
+│   ├── context.mjs         resolves a project root + "wrench" config from cwd
+│   ├── lib/
+│   │   ├── run.mjs          spawn wrapper, friendly errors for missing tools
+│   │   ├── version-file.mjs read/bump version.json
+│   │   └── detect.mjs       build.sh passthrough + npm-fallback prompt
+│   └── commands/            dev, build, test, deploy, infra, promote, list, version
+├── python/build_tools.py   the actual S3 upload / promote engine (boto3)
+└── infra-module/            shared Terraform module (S3 + CloudFront + OAC)
+```

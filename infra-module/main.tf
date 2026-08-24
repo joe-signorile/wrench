@@ -1,8 +1,9 @@
 terraform {
   required_providers {
     aws = {
-      source  = "hashicorp/aws"
-      version = "~> 5.0"
+      source                = "hashicorp/aws"
+      version               = "~> 5.0"
+      configuration_aliases = [aws.us_east_1]
     }
     random = {
       source  = "hashicorp/random"
@@ -17,6 +18,22 @@ resource "random_id" "suffix" {
 
 locals {
   bucket_name = "${var.project_name}-client-${random_id.suffix.hex}"
+
+  # Empty string means apex (root_domain itself); a non-empty label gets
+  # "<subdomain>.<root_domain>". null means custom-domain wiring is off.
+  fqdn = var.subdomain == null ? null : (
+    var.subdomain == "" ? var.root_domain : "${var.subdomain}.${var.root_domain}"
+  )
+}
+
+# Looked up by domain name (not passed in as an ARN) so sites don't need to
+# read wrench/domain's Terraform state — see wrench/domain/main.tf.
+data "aws_acm_certificate" "wildcard" {
+  count       = var.subdomain != null ? 1 : 0
+  domain      = var.root_domain
+  statuses    = ["ISSUED"]
+  most_recent = true
+  provider    = aws.us_east_1
 }
 
 # ---------------------------
@@ -53,6 +70,7 @@ resource "aws_cloudfront_distribution" "client" {
   default_root_object = "index.html"
   price_class         = "PriceClass_100"
   comment             = "${var.project_name} client"
+  aliases             = var.subdomain == null ? [] : [local.fqdn]
 
   origin {
     domain_name              = aws_s3_bucket.client.bucket_regional_domain_name
@@ -101,7 +119,25 @@ resource "aws_cloudfront_distribution" "client" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = true
+    cloudfront_default_certificate = var.subdomain == null ? true : null
+    acm_certificate_arn            = var.subdomain == null ? null : data.aws_acm_certificate.wildcard[0].arn
+    ssl_support_method             = var.subdomain == null ? null : "sni-only"
+    minimum_protocol_version       = var.subdomain == null ? null : "TLSv1.2_2021"
+  }
+}
+
+# CloudFront's hosted-zone-id is a fixed, well-known AWS constant shared by
+# every distribution globally — not looked up, just documented here.
+resource "aws_route53_record" "alias" {
+  count   = var.subdomain == null ? 0 : 1
+  zone_id = var.hosted_zone_id
+  name    = local.fqdn
+  type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.client.domain_name
+    zone_id                = "Z2FDTNDATAQYW2"
+    evaluate_target_health = false
   }
 }
 
