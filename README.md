@@ -1,6 +1,6 @@
 # wrench
 
-![wrench icon](./icon.png)
+<img src="icon.png" width="80" height="80" alt="wrench" align="left">
 
 My personal build/deploy CLI for static SPAs (Vite + Svelte + TypeScript) on
 AWS S3 + CloudFront, provisioned by Terraform. It is not a generic tool — it
