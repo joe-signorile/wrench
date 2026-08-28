@@ -1,44 +1,24 @@
-import { join } from 'node:path';
-import { loadProject, wrenchRoot } from '../context.mjs';
-import { readVersion, formatVersion } from '../lib/version-file.mjs';
-import { run, runCapture } from '../lib/run.mjs';
-import { loadWrenchConfig } from '../lib/wrench-config.mjs';
+import { loadProject } from '../context.mjs';
+import { readVersion, formatVersion, assertSemver } from '../lib/version-file.mjs';
+import { UserError } from '../lib/errors.mjs';
+import { infraDir, terraformOutputs, buildDeployEnv, runBuildTools } from '../lib/deploy-env.mjs';
 
 async function deployEnv(project) {
-  const infraDir = join(project.root, 'infra');
-  let bucket, distribution;
-  try {
-    bucket = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'bucket_name']);
-    distribution = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'cloudfront_distribution_id']);
-  } catch (err) {
-    throw new Error(`${err.message}\nRun 'wrench infra apply' first.`);
-  }
-  const wrenchConfig = loadWrenchConfig();
-  return {
-    ...process.env,
-    WRENCH_PROJECT_ROOT: project.root,
-    WRENCH_S3_BUCKET: bucket,
-    WRENCH_CF_DISTRIBUTION: distribution,
-    WRENCH_DISPLAY_NAME: project.displayName,
-    WRENCH_ACCENT_COLOR: project.accentColor,
-    WRENCH_PROJECT_NAME: project.name || '',
-    WRENCH_SUBDOMAIN: project.subdomain ?? '',
-    WRENCH_ROOT_DOMAIN: wrenchConfig.rootDomain || '',
-    WRENCH_REGISTRY_BUCKET: wrenchConfig.registryBucket || '',
-  };
+  const dir = infraDir(project);
+  return buildDeployEnv(project, await terraformOutputs(dir));
 }
 
-export async function promote(args) {
-  const project = loadProject();
-  const version = args[0] || formatVersion(readVersion(project.root));
+export async function promote(args = []) {
+  if (args.length > 1) throw new UserError(`Usage: wrench promote [version]`);
+  const project = loadProject(process.cwd(), { requireVersion: args.length === 0 });
+  const version = args[0] ? assertSemver(args[0]) : formatVersion(readVersion(project.root));
   const env = await deployEnv(project);
-  const buildTools = join(wrenchRoot, 'python', 'build_tools.py');
-  await run('python3', [buildTools, 'promote', '--version', version], { cwd: project.root, env });
+  await runBuildTools(project, env, ['promote', '--version', version]);
 }
 
-export async function list() {
+export async function list(args = []) {
+  if (args.length) throw new UserError(`Usage: wrench list`);
   const project = loadProject();
   const env = await deployEnv(project);
-  const buildTools = join(wrenchRoot, 'python', 'build_tools.py');
-  await run('python3', [buildTools, 'list'], { cwd: project.root, env });
+  await runBuildTools(project, env, ['list']);
 }

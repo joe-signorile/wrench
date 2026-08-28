@@ -1,23 +1,21 @@
-import { join } from 'node:path';
 import { loadProject } from '../context.mjs';
 import { run } from '../lib/run.mjs';
+import { UserError } from '../lib/errors.mjs';
+import { infraDir } from '../lib/deploy-env.mjs';
 
-export async function infra(subArgs) {
-  const project = loadProject();
-  const infraDir = join(project.root, 'infra');
+const SUBCOMMANDS = ['plan', 'apply', 'output'];
+
+export async function infra(subArgs = []) {
   const [cmd, ...rest] = subArgs;
-
-  if (!cmd || !['plan', 'apply', 'output'].includes(cmd)) {
-    throw new Error(`Usage: wrench infra <plan|apply|output> [args...]`);
+  if (!cmd || !SUBCOMMANDS.includes(cmd)) {
+    throw new UserError(`Usage: wrench infra <${SUBCOMMANDS.join('|')}> [args...]`);
   }
 
-  await run('terraform', [`-chdir=${infraDir}`, 'init', '-input=false']);
+  const project = loadProject();
+  const dir = infraDir(project);
 
-  if (cmd === 'apply') {
-    await run('terraform', [`-chdir=${infraDir}`, 'apply', '-auto-approve', ...rest]);
-  } else if (cmd === 'plan') {
-    await run('terraform', [`-chdir=${infraDir}`, 'plan', ...rest]);
-  } else if (cmd === 'output') {
-    await run('terraform', [`-chdir=${infraDir}`, 'output', ...rest]);
-  }
+  await run('terraform', [`-chdir=${dir}`, 'init', '-input=false']);
+
+  const extra = cmd === 'apply' ? ['-auto-approve'] : [];
+  await run('terraform', [`-chdir=${dir}`, cmd, ...extra, ...rest]);
 }

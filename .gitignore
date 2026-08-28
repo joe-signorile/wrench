@@ -9,3 +9,7 @@ __pycache__/
 tfplan
 domain/
 wrench.config.json
+.venv*/
+.wrench/
+.coverage
+htmlcov/

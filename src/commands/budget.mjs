@@ -1,7 +1,9 @@
 // Reports dist/ size, and names the largest files when it runs over budget.
 // Advisory only — never fails the build.
-import { readdirSync, statSync } from 'node:fs';
+import { readdirSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
+
+const DEFAULT_BUDGET_MB = 15;
 
 function walk(root, dir) {
   let total = 0;
@@ -21,18 +23,33 @@ function walk(root, dir) {
   return { total, biggest };
 }
 
-export function checkBudget(projectRoot, budgetMb) {
-  const budget = budgetMb ?? Number(process.env.DIST_BUDGET_MB ?? 15);
+export function resolveBudget(budgetMb, envValue) {
+  if (budgetMb != null) return budgetMb;
+  if (envValue === undefined || envValue === '') return DEFAULT_BUDGET_MB;
+
+  const parsed = Number(envValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `wrench budget: DIST_BUDGET_MB="${envValue}" isn't a positive number — using ${DEFAULT_BUDGET_MB} MB.`
+    );
+    return DEFAULT_BUDGET_MB;
+  }
+  return parsed;
+}
+
+export function checkBudget(projectRoot, budgetMb, env = process.env) {
+  const budget = resolveBudget(budgetMb, env.DIST_BUDGET_MB);
   const dist = join(projectRoot, 'dist');
 
-  let result;
-  try {
-    result = walk(projectRoot, dist);
-  } catch {
+  // Only a missing dist/ is skippable. Anything else (permissions, a broken
+  // symlink) is a real problem and should surface rather than be reported as
+  // "dist/ not found".
+  if (!existsSync(dist)) {
     console.warn('wrench budget: dist/ not found — skipping.');
     return;
   }
 
+  const result = walk(projectRoot, dist);
   const mb = result.total / 1024 / 1024;
 
   if (mb > budget) {

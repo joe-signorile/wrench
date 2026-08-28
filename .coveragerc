@@ -1,0 +1,8 @@
+[run]
+source = python
+omit = python/tests/*
+
+[report]
+show_missing = True
+skip_covered = True
+fail_under = 90

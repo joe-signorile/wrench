@@ -1,27 +1,39 @@
-import { existsSync } from 'node:fs';
+import { statSync, accessSync, constants } from 'node:fs';
 import { join } from 'node:path';
-import { createInterface } from 'node:readline/promises';
 import { run } from './run.mjs';
+import { UserError } from './errors.mjs';
 
-export async function execLegacyBuildScript(cwd, args) {
-  const script = join(cwd, 'build.sh');
-  await run(script, args, { cwd });
+export function buildScriptPath(cwd) {
+  return join(cwd, 'build.sh');
 }
 
-export async function confirmNpmFallback(cwd) {
-  console.log(`No build.sh found in ${cwd}.`);
-
-  if (!process.stdin.isTTY) {
-    console.log('Non-interactive session — checking for an npm-based wrench project.');
-    return true;
-  }
-
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const answer = await rl.question('Check for an npm-based wrench project instead? [Y/n] ');
-  rl.close();
-  return !/^n/i.test(answer.trim());
-}
-
+// True only for a real, executable build.sh. A directory or a non-executable
+// file named build.sh is not a passthrough target — say so rather than
+// failing later inside spawn.
 export function hasBuildScript(cwd) {
-  return existsSync(join(cwd, 'build.sh'));
+  const script = buildScriptPath(cwd);
+  let st;
+  try {
+    st = statSync(script);
+  } catch {
+    return false;
+  }
+  if (!st.isFile()) {
+    throw new UserError(`${script} exists but is not a regular file.`);
+  }
+  try {
+    accessSync(script, constants.X_OK);
+  } catch {
+    throw new UserError(`${script} is not executable — run 'chmod +x ${script}'.`);
+  }
+  return true;
+}
+
+// Full passthrough: wrench does not inspect this script, it just runs it.
+// Announce the resolved path first, since this hands control to an arbitrary
+// executable found in whatever directory wrench was invoked from.
+export async function execLegacyBuildScript(cwd, args) {
+  const script = buildScriptPath(cwd);
+  console.log(`exec ${script}`);
+  await run(script, args, { cwd });
 }

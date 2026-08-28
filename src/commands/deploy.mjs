@@ -1,63 +1,50 @@
-import { join } from 'node:path';
-import { loadProject, wrenchRoot } from '../context.mjs';
-import { bumpVersion, formatVersion } from '../lib/version-file.mjs';
-import { run, runCapture } from '../lib/run.mjs';
-import { loadWrenchConfig } from '../lib/wrench-config.mjs';
+import { loadProject } from '../context.mjs';
+import { bumpVersion, setVersion, formatVersion, assertSemver } from '../lib/version-file.mjs';
+import { run } from '../lib/run.mjs';
+import { UserError } from '../lib/errors.mjs';
+import { infraDir, terraformOutputs, buildDeployEnv, runBuildTools } from '../lib/deploy-env.mjs';
 import { build } from './build.mjs';
 
-const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-
-function parseFlags(args) {
+export function parseFlags(args = []) {
   const flags = { force: false, clean: false, version: null };
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--force') flags.force = true;
-    else if (args[i] === '--clean') flags.clean = true;
-    else if (args[i] === '--version') flags.version = args[++i];
+    const arg = args[i];
+    if (arg === '--force') flags.force = true;
+    else if (arg === '--clean') flags.clean = true;
+    else if (arg === '--version') {
+      const value = args[++i];
+      if (value === undefined) throw new UserError('--version needs a value (X.Y.Z).');
+      flags.version = value;
+    } else {
+      throw new UserError(`Unknown argument for 'wrench deploy': ${arg}`);
+    }
   }
-  if (flags.version && !SEMVER_RE.test(flags.version)) {
-    throw new Error(`--version "${flags.version}" isn't strict SemVer (X.Y.Z).`);
-  }
+  if (flags.version) assertSemver(flags.version, '--version');
   return flags;
 }
 
 export async function deploy(args) {
   const flags = parseFlags(args);
-  const project = loadProject();
-  const infraDir = join(project.root, 'infra');
+  const project = loadProject(process.cwd(), { requireVersion: true });
+  const dir = infraDir(project);
 
-  let version = flags.version;
-  if (!version) {
-    const v = bumpVersion(project.root);
-    version = formatVersion(v);
-  }
+  // The build embeds version.json, so an explicit --version has to be written
+  // there before building — otherwise the built assets and the S3 prefix they
+  // land under disagree.
+  const v = flags.version ? setVersion(project.root, flags.version) : bumpVersion(project.root);
+  const version = formatVersion(v);
   console.log(`v${version}`);
 
-  await build();
+  await build({ clean: flags.clean }, project);
 
-  await run('terraform', [`-chdir=${infraDir}`, 'init', '-input=false']);
-  await run('terraform', [`-chdir=${infraDir}`, 'apply', '-auto-approve']);
+  await run('terraform', [`-chdir=${dir}`, 'init', '-input=false']);
+  await run('terraform', [`-chdir=${dir}`, 'apply', '-auto-approve']);
 
-  const bucket = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'bucket_name']);
-  const distribution = await runCapture('terraform', [`-chdir=${infraDir}`, 'output', '-raw', 'cloudfront_distribution_id']);
+  const env = buildDeployEnv(project, await terraformOutputs(dir));
 
-  const wrenchConfig = loadWrenchConfig();
-  const env = {
-    ...process.env,
-    WRENCH_PROJECT_ROOT: project.root,
-    WRENCH_S3_BUCKET: bucket,
-    WRENCH_CF_DISTRIBUTION: distribution,
-    WRENCH_DISPLAY_NAME: project.displayName,
-    WRENCH_ACCENT_COLOR: project.accentColor,
-    WRENCH_PROJECT_NAME: project.name || '',
-    WRENCH_SUBDOMAIN: project.subdomain ?? '',
-    WRENCH_ROOT_DOMAIN: wrenchConfig.rootDomain || '',
-    WRENCH_REGISTRY_BUCKET: wrenchConfig.registryBucket || '',
-  };
-
-  const buildTools = join(wrenchRoot, 'python', 'build_tools.py');
   const uploadArgs = ['upload', '--version', version];
   if (flags.force) uploadArgs.push('--force');
-  await run('python3', [buildTools, ...uploadArgs], { cwd: project.root, env });
+  await runBuildTools(project, env, uploadArgs);
 
-  await run('python3', [buildTools, 'promote', '--version', version], { cwd: project.root, env });
+  await runBuildTools(project, env, ['promote', '--version', version]);
 }

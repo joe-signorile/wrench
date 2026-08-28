@@ -19,6 +19,11 @@ resource "random_id" "suffix" {
 locals {
   bucket_name = "${var.project_name}-client-${random_id.suffix.hex}"
 
+  tags = merge(var.tags, {
+    Project   = var.project_name
+    ManagedBy = "wrench"
+  })
+
   # Empty string means apex (root_domain itself); a non-empty label gets
   # "<subdomain>.<root_domain>". null means custom-domain wiring is off.
   fqdn = var.subdomain == null ? null : (
@@ -41,6 +46,42 @@ data "aws_acm_certificate" "wildcard" {
 # ---------------------------
 resource "aws_s3_bucket" "client" {
   bucket = local.bucket_name
+  tags   = local.tags
+}
+
+# `wrench deploy --force` deletes a whole versions/<v>/ prefix before replacing
+# it. Versioning makes that recoverable; without it the previous build is gone.
+resource "aws_s3_bucket_versioning" "client" {
+  bucket = aws_s3_bucket.client.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "client" {
+  bucket     = aws_s3_bucket.client.id
+  depends_on = [aws_s3_bucket_versioning.client]
+
+  # Keep the safety net short — this is a rollback window, not an archive.
+  rule {
+    id     = "expire-noncurrent-versions"
+    status = "Enabled"
+    filter {}
+    noncurrent_version_expiration {
+      noncurrent_days = var.noncurrent_version_retention_days
+    }
+  }
+
+  # A killed upload can strand multipart parts that are invisible in the
+  # console and billed indefinitely.
+  rule {
+    id     = "abort-incomplete-multipart-uploads"
+    status = "Enabled"
+    filter {}
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
 }
 
 resource "aws_s3_bucket_public_access_block" "client" {
@@ -55,7 +96,7 @@ resource "aws_s3_bucket_public_access_block" "client" {
 # CloudFront Origin Access Control
 # ---------------------------
 resource "aws_cloudfront_origin_access_control" "client" {
-  name                              = "${var.project_name}-oac"
+  name                              = "${var.project_name}-oac-${random_id.suffix.hex}"
   description                       = "OAC for ${var.project_name} S3 origin"
   origin_access_control_origin_type = "s3"
   signing_behavior                  = "always"
@@ -71,6 +112,7 @@ resource "aws_cloudfront_distribution" "client" {
   price_class         = "PriceClass_100"
   comment             = "${var.project_name} client"
   aliases             = var.subdomain == null ? [] : [local.fqdn]
+  tags                = local.tags
 
   origin {
     domain_name              = aws_s3_bucket.client.bucket_regional_domain_name
@@ -97,16 +139,17 @@ resource "aws_cloudfront_distribution" "client" {
     cache_policy_id        = "658327ea-f89d-4fab-a63d-7e88639e58f6" # CachingOptimized
   }
 
-  # S3 returns 403 for missing keys with OAC; fall back to index.html
+  # With OAC, S3 answers a missing key with 403 (never 404 — there is no rule
+  # for it because it cannot happen). This fallback is load-bearing for
+  # history-API routing inside the versioned iframe.
+  #
+  # The tradeoff: a genuinely missing asset is answered with the wrapper HTML
+  # under a 200, which a browser then fails to parse as JS. What keeps that
+  # from happening is upload atomicity — build_tools deletes a partially
+  # uploaded version prefix and refuses to promote a version with no
+  # index.html, so an incomplete build never becomes reachable.
   custom_error_response {
     error_code            = 403
-    response_code         = 200
-    response_page_path    = "/index.html"
-    error_caching_min_ttl = 0
-  }
-
-  custom_error_response {
-    error_code            = 404
     response_code         = 200
     response_page_path    = "/index.html"
     error_caching_min_ttl = 0

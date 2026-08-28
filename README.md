@@ -53,24 +53,20 @@ cp wrench.config.example.json wrench.config.json
 
 ## How `wrench` decides what to do
 
-Run `wrench` (with or without a subcommand) from inside any directory:
+Run `wrench` (with or without a subcommand) from inside any directory. It
+picks one of three paths, in order:
 
-1. **If that directory has its own `build.sh`**, wrench execs it directly —
-   full passthrough, whatever args you typed after `wrench` get forwarded.
-   This is the compatibility path for any project that predates wrench and
-   still uses the old copy-pasted `build.sh` + `infra/build_tools.py`
-   convention. Nothing about that script's contents is inspected; it just
-   runs.
-2. **Otherwise**, wrench prints `No build.sh found in <dir>.` and — if
-   you're at an interactive terminal — asks
-   `Check for an npm-based wrench project instead? [Y/n]`. Answering no (or
-   piping/CI input, which skips the prompt and proceeds automatically)
-   either exits cleanly or falls through to wrench's own pipeline, which
-   requires the project to have `package.json` and `version.json` (see
-   below).
+1. **The directory has an executable `build.sh`** — wrench prints the resolved
+   path and execs it, forwarding every argument you typed. This is the
+   compatibility path for projects that predate wrench and still use the old
+   copy-pasted `build.sh` + `infra/build_tools.py` convention. Nothing about
+   the script's contents is inspected; it just runs.
+2. **The directory has a `package.json`** — wrench runs its own pipeline. No
+   prompt, no output about `build.sh`.
+3. **Neither** — wrench exits 1 with usage.
 
-In short: `wrench` works in *any* directory on the machine. What it does
-once there depends on what it finds.
+A `build.sh` that exists but isn't a regular executable file is reported as
+such rather than failing obscurely inside `spawn`.
 
 ## Setting up a new wrench-native project
 
@@ -96,6 +92,31 @@ module "static_site" {
   project_name = var.project_name
 }
 ```
+
+To publish under a custom domain, pass the domain variables through as well.
+`subdomain` distinguishes three states, and the difference matters — it is what
+the shared registry uses to decide this site's URL:
+
+| `subdomain` | Meaning | Resulting URL |
+|---|---|---|
+| unset / `null` | no custom-domain wiring | the default `*.cloudfront.net` domain |
+| `""` | the apex itself | `https://<root_domain>/` |
+| `"app"` | a subdomain | `https://app.<root_domain>/` |
+
+```hcl
+module "static_site" {
+  source         = "../../wrench/infra-module"
+  project_name   = var.project_name
+  subdomain      = "app"
+  root_domain    = "example.com"
+  hosted_zone_id = var.hosted_zone_id
+}
+```
+
+The certificate is looked up by domain name, so `wrench/domain/` (a one-off
+Terraform root that issues the wildcard ACM cert) never has to be touched
+again once the cert is ISSUED. That directory is gitignored — it holds a
+specific personal domain — so create your own if you need one.
 
 **`infra/variables.tf`**:
 
@@ -139,10 +160,20 @@ page, plus `test`/`build` npm scripts wrench shells out to:
   "wrench": {
     "displayName": "Your Project",
     "accentColor": "#569cd6",
-    "distBudgetMb": 15
+    "distBudgetMb": 15,
+    "subdomain": "app"
   }
 }
 ```
+
+`accentColor` must be a hex color and `subdomain` must be a string; wrench
+rejects anything else rather than passing it through into the generated page.
+`subdomain` here mirrors the Terraform variable above — omit it entirely if the
+site has no custom domain.
+
+Add `.wrench/` to the project's `.gitignore` — wrench writes `.wrench/build.log`
+there during a deploy. It is deliberately outside `dist/`, which gets uploaded
+wholesale.
 
 Your `vite.config.ts` should use a relative `base: './'` — the whole
 versioned-deploy scheme depends on the build resolving identically whether
@@ -166,9 +197,9 @@ wrench deploy
 |---|---|
 | `wrench` *(no subcommand)* | Same as `wrench deploy` — build and deploy in one step |
 | `wrench dev` | Bump version, run tests (non-blocking), start Vite |
-| `wrench build [--clean]` | `npm run build`, verify `dist/index.html`, advisory dist-size budget check |
+| `wrench build [--clean]` | `npm run build`, verify `dist/index.html`, advisory dist-size budget check. `--clean` wipes `dist/` first |
 | `wrench test` | `npm test` |
-| `wrench deploy [--force] [--clean] [--version X.Y.Z]` | Bump version, build, `terraform apply` (idempotent), upload to S3, promote |
+| `wrench deploy [--force] [--clean] [--version X.Y.Z]` | Bump version, build, `terraform apply` (idempotent), upload to S3, promote. `--version` sets `version.json` before building, so the build and the S3 prefix agree; `--force` replaces an already-uploaded version |
 | `wrench infra plan\|apply\|output [args...]` | Run Terraform against `infra/` directly, without a full deploy |
 | `wrench promote [version]` | Promote an already-uploaded version without rebuilding |
 | `wrench list` | List every version currently in S3 |
@@ -186,6 +217,12 @@ to the bucket root and fires a targeted CloudFront invalidation for
 `/index.html` only. The root page is served `no-cache`; everything under
 `versions/` is `immutable`.
 
+A version prefix is either complete or absent: if an upload fails partway,
+wrench deletes what it wrote before reporting the error, so a retry never has
+to reach for `--force`. Promoting refuses a version that has no `index.html`,
+so a half-uploaded build cannot become the live site. The bucket is versioned
+with a 30-day window, which is what makes `--force` recoverable.
+
 Rollback is re-promoting an older version — no rebuild, no re-upload:
 
 ```sh
@@ -196,14 +233,32 @@ wrench promote 1.2.3
 
 ```
 wrench/
-├── bin/wrench.mjs         entrypoint: detection chain + subcommand dispatch
+├── bin/wrench.mjs          entrypoint: detection chain + subcommand dispatch
 ├── src/
 │   ├── context.mjs         resolves a project root + "wrench" config from cwd
 │   ├── lib/
 │   │   ├── run.mjs          spawn wrapper, friendly errors for missing tools
-│   │   ├── version-file.mjs read/bump version.json
-│   │   └── detect.mjs       build.sh passthrough + npm-fallback prompt
+│   │   ├── version-file.mjs read/bump/validate version.json, atomic writes
+│   │   ├── deploy-env.mjs   terraform outputs -> the env build_tools reads
+│   │   ├── detect.mjs       build.sh passthrough
+│   │   └── errors.mjs       UserError: the errors that print without a stack
 │   └── commands/            dev, build, test, deploy, infra, promote, list, version
-├── python/build_tools.py   the actual S3 upload / promote engine (boto3)
-└── infra-module/            shared Terraform module (S3 + CloudFront + OAC)
+├── python/
+│   ├── build_tools.py      the S3 upload / promote engine (boto3)
+│   └── tests/              unittest + moto
+├── test/                   node --test
+└── infra-module/           shared Terraform module (S3 + CloudFront + OAC)
 ```
+
+## Development
+
+```sh
+npm test                                   # Node CLI
+
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m unittest discover -s python -t python   # build_tools.py
+```
+
+The Python suite runs entirely against [moto](https://github.com/getmoto/moto);
+it never touches a real AWS account. `WRENCH_DEBUG=1` makes `build_tools.py`
+print a traceback instead of a one-line error.

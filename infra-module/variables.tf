@@ -20,3 +20,15 @@ variable "hosted_zone_id" {
   type        = string
   default     = null
 }
+
+variable "noncurrent_version_retention_days" {
+  description = "How long superseded S3 object versions are kept, so a --force replace stays recoverable."
+  type        = number
+  default     = 30
+}
+
+variable "tags" {
+  description = "Extra tags merged onto every taggable resource."
+  type        = map(string)
+  default     = {}
+}
