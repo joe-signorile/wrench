@@ -1,7 +1,12 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { writeFileSync, chmodSync } from 'node:fs';
+import { join } from 'node:path';
 import { run, runCapture, runBestEffort } from '../src/lib/run.mjs';
 import { UserError } from '../src/lib/errors.mjs';
+import { tmpProject, cleanup } from './helpers.mjs';
+
+after(cleanup);
 
 const NODE = process.execPath;
 const quiet = { stdio: ['ignore', 'ignore', 'ignore'] };
@@ -31,10 +36,14 @@ test('a missing command carries an install hint for known tools', async () => {
   );
 });
 
-test('vite resolved by absolute path still gets its hint', async () => {
+test('a non-executable file is a friendly permission error, not a raw EACCES', async () => {
+  const dir = tmpProject();
+  const script = join(dir, 'no-exec.sh');
+  writeFileSync(script, '#!/bin/sh\nexit 0\n');
+  chmodSync(script, 0o644); // readable, not executable
   await assert.rejects(
-    run('/nope/node_modules/.bin/vite', [], quiet),
-    (e) => /npm install/.test(e.message),
+    run(script, [], quiet),
+    (e) => e instanceof UserError && /Permission denied running/.test(e.message) && e.message.includes(script),
   );
 });
 

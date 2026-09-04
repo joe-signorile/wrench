@@ -4,12 +4,10 @@ import { UserError } from './errors.mjs';
 const INSTALL_HINTS = {
   terraform: 'install it: https://developer.hashicorp.com/terraform/install',
   python3: 'install it: https://www.python.org/downloads/',
-  vite: "it isn't in this project's node_modules — run 'npm install'",
 };
 
 function hintFor(cmd) {
-  // dev spawns node_modules/.bin/vite by absolute path; key off the basename.
-  return INSTALL_HINTS[cmd] || INSTALL_HINTS[cmd.split('/').pop()];
+  return INSTALL_HINTS[cmd];
 }
 
 function friendlyError(cmd, err) {

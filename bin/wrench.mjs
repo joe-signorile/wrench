@@ -14,7 +14,7 @@ import { UserError } from '../src/lib/errors.mjs';
 const USAGE = `wrench [command]
 
   (no command)                same as 'deploy' — build + deploy in one step
-  dev                         bump version, run tests (non-blocking), start vite
+  dev                         bump version, run tests (non-blocking), npm run dev
   build [--clean]             npm run build, verify dist/, budget check
   test                        npm test
   deploy [--force] [--clean] [--version X.Y.Z]

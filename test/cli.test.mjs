@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmodSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpProject, cleanup, cliPath, repoRoot, pkg, versionJson } from './helpers.mjs';
+import { tmpProject, cleanup, cliPath, repoRoot, pkg, versionJson, fakeBin } from './helpers.mjs';
 
 const exec = promisify(execFile);
 after(cleanup);
@@ -120,6 +120,40 @@ test('deploy validates its flags before touching version.json', async () => {
   assert.equal(r.code, 1);
   assert.match(r.stderr, /isn't strict SemVer/);
   assert.deepEqual(JSON.parse(readFileSync(join(dir, 'version.json'), 'utf8')), { major: 0, minor: 0, patch: 7 });
+});
+
+test('no command at all means deploy', async () => {
+  const dir = tmpProject({ 'package.json': pkg(), 'version.json': versionJson(0, 0, 3) });
+  const restore = fakeBin({ npm: 'exit 1' }); // fail fast, before terraform — just prove deploy ran
+  try {
+    const r = await wrench(dir, []);
+    assert.equal(r.code, 1);
+    assert.match(r.stdout, /v0\.0\.4/, 'deploy should have bumped and printed the version');
+  } finally { restore(); }
+});
+
+test('build runs through the CLI dispatcher', async () => {
+  const dir = tmpProject({ 'package.json': pkg() });
+  const restore = fakeBin({ npm: 'mkdir -p dist && echo hi > dist/index.html' });
+  try {
+    const r = await wrench(dir, ['build']);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(existsSync(join(dir, 'dist', 'index.html')));
+  } finally { restore(); }
+});
+
+test('a bug in wrench (not a UserError) prints a full stack, not a bare message', async () => {
+  // writeVersion() re-throws raw fs errors (not UserError) when the atomic
+  // rename-into-place fails. Make the project dir unwritable so the tmp-file
+  // write inside `wrench version bump` fails with a raw EACCES, and exercise
+  // the CLI's "not a UserError" branch.
+  const dir = tmpProject({ 'package.json': pkg(), 'version.json': versionJson() });
+  chmodSync(dir, 0o500);
+  try {
+    const r = await wrench(dir, ['version', 'bump']);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, / at .*\.mjs:\d+/, 'a real bug should print its stack');
+  } finally { chmodSync(dir, 0o755); }
 });
 
 test('deploy refuses a corrupt version.json before running the build', async () => {

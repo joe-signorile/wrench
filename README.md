@@ -2,10 +2,10 @@
 
 <img src="icon.png" width="80" height="80" alt="wrench" align="left">
 
-My personal build/deploy CLI for static SPAs (Vite + Svelte + TypeScript) on
-AWS S3 + CloudFront, provisioned by Terraform. It is not a generic tool — it
-assumes this exact stack, this exact directory layout, and my AWS account
-conventions. If that's your stack too, it'll work for you as-is.
+Build and deploy CLI for static SPAs on AWS S3 + CloudFront, provisioned by
+Terraform. Build, test, and deploy run through your project's own npm
+scripts, so any toolchain works. It assumes a specific directory layout and
+AWS account setup, both described below.
 
 ## Requirements
 
@@ -16,11 +16,10 @@ conventions. If that's your stack too, it'll work for you as-is.
 
 ## Install
 
-Clone this repo as a **sibling directory** to any project that will use it —
-that's not optional, it's load-bearing. Every wrench-managed project's
-`infra/main.tf` points at the shared Terraform module by relative path:
-`../../wrench/infra-module`. If `wrench` isn't a sibling of your project
-directory, that path breaks.
+Clone this repo as a **sibling directory** to any project that uses it. This
+is required: every wrench-managed project's `infra/main.tf` points at the
+shared Terraform module by relative path, `../../wrench/infra-module`. If
+`wrench` isn't a sibling of your project directory, that path breaks.
 
 ```
 projects/
@@ -36,8 +35,8 @@ cd wrench
 npm link
 ```
 
-`wrench` is now on your `$PATH` globally (as long as your Node install's
-global bin dir is on `$PATH` — true by default under nvm).
+`wrench` is now on your `$PATH` globally (true by default under nvm, as long
+as your Node install's global bin dir is on `$PATH`).
 
 Copy `wrench.config.example.json` to `wrench.config.json` (gitignored) and
 fill in your own values:
@@ -46,9 +45,9 @@ fill in your own values:
 cp wrench.config.example.json wrench.config.json
 ```
 
-- `rootDomain` — the domain your sites are published under (e.g. a project
+- `rootDomain`: the domain your sites are published under (e.g. a project
   deploys to `<subdomain>.<rootDomain>`).
-- `registryBucket` — the S3 bucket holding the shared `manifest.json` that
+- `registryBucket`: the S3 bucket holding the shared `manifest.json` that
   tracks every wrench-deployed project.
 
 ## How `wrench` decides what to do
@@ -56,14 +55,14 @@ cp wrench.config.example.json wrench.config.json
 Run `wrench` (with or without a subcommand) from inside any directory. It
 picks one of three paths, in order:
 
-1. **The directory has an executable `build.sh`** — wrench prints the resolved
-   path and execs it, forwarding every argument you typed. This is the
-   compatibility path for projects that predate wrench and still use the old
-   copy-pasted `build.sh` + `infra/build_tools.py` convention. Nothing about
-   the script's contents is inspected; it just runs.
-2. **The directory has a `package.json`** — wrench runs its own pipeline. No
+1. **The directory has an executable `build.sh`.** wrench prints the
+   resolved path and execs it, forwarding every argument you typed. This is
+   the compatibility path for projects that predate wrench and still use the
+   old copy-pasted `build.sh` + `infra/build_tools.py` convention. Nothing
+   about the script's contents is inspected; it just runs.
+2. **The directory has a `package.json`.** wrench runs its own pipeline. No
    prompt, no output about `build.sh`.
-3. **Neither** — wrench exits 1 with usage.
+3. **Neither.** wrench exits 1 with usage.
 
 A `build.sh` that exists but isn't a regular executable file is reported as
 such rather than failing obscurely inside `spawn`.
@@ -72,7 +71,7 @@ such rather than failing obscurely inside `spawn`.
 
 A project is "wrench-native" once it has:
 
-**`infra/main.tf`** — a thin wrapper around the shared module:
+**`infra/main.tf`**, a thin wrapper around the shared module:
 
 ```hcl
 terraform {
@@ -94,8 +93,8 @@ module "static_site" {
 ```
 
 To publish under a custom domain, pass the domain variables through as well.
-`subdomain` distinguishes three states, and the difference matters — it is what
-the shared registry uses to decide this site's URL:
+`subdomain` distinguishes three states that the shared registry uses to
+decide this site's URL:
 
 | `subdomain` | Meaning | Resulting URL |
 |---|---|---|
@@ -115,8 +114,8 @@ module "static_site" {
 
 The certificate is looked up by domain name, so `wrench/domain/` (a one-off
 Terraform root that issues the wildcard ACM cert) never has to be touched
-again once the cert is ISSUED. That directory is gitignored — it holds a
-specific personal domain — so create your own if you need one.
+again once the cert is issued. That directory is gitignored, since it holds
+a domain-specific cert; create your own if you need one.
 
 **`infra/variables.tf`**:
 
@@ -132,7 +131,7 @@ variable "aws_region" {
 }
 ```
 
-**`infra/outputs.tf`** — re-export the module's outputs (the exact names
+**`infra/outputs.tf`**: re-export the module's outputs (the exact names
 `wrench` reads via `terraform output`):
 
 ```hcl
@@ -141,19 +140,20 @@ output "cloudfront_distribution_id" { value = module.static_site.cloudfront_dist
 output "cloudfront_domain"          { value = module.static_site.cloudfront_domain }
 ```
 
-**`version.json`** at the project root — the single source of truth for the
+**`version.json`** at the project root, the single source of truth for the
 deployed version, bumped automatically by `wrench dev`/`wrench deploy`:
 
 ```json
 {"major":0,"minor":0,"patch":0}
 ```
 
-**`package.json`** — an optional `"wrench"` key for cosmetics on the promote
-page, plus `test`/`build` npm scripts wrench shells out to:
+**`package.json`**: an optional `"wrench"` key for cosmetics on the promote
+page, plus `dev`/`test`/`build` npm scripts wrench shells out to:
 
 ```json
 {
   "scripts": {
+    "dev": "vite",
     "test": "node --test 'src/tests/**/*.test.ts'",
     "build": "tsc --noEmit && vite build"
   },
@@ -168,16 +168,17 @@ page, plus `test`/`build` npm scripts wrench shells out to:
 
 `accentColor` must be a hex color and `subdomain` must be a string; wrench
 rejects anything else rather than passing it through into the generated page.
-`subdomain` here mirrors the Terraform variable above — omit it entirely if the
-site has no custom domain.
+`subdomain` here mirrors the Terraform variable above; omit it entirely if
+the site has no custom domain.
 
-Add `.wrench/` to the project's `.gitignore` — wrench writes `.wrench/build.log`
-there during a deploy. It is deliberately outside `dist/`, which gets uploaded
+Add `.wrench/` to the project's `.gitignore`. wrench writes `.wrench/build.log`
+there during a deploy, deliberately outside `dist/`, which gets uploaded
 wholesale.
 
-Your `vite.config.ts` should use a relative `base: './'` — the whole
-versioned-deploy scheme depends on the build resolving identically whether
-it's served from the bucket root or nested under `/versions/<version>/`.
+Whatever builds `dist/` needs relative asset paths (e.g. Vite's
+`base: './'`). The whole versioned-deploy scheme depends on the build
+resolving identically whether it's served from the bucket root or nested
+under `/versions/<version>/`.
 
 Then, once:
 
@@ -195,8 +196,8 @@ wrench deploy
 
 | Command | What it does |
 |---|---|
-| `wrench` *(no subcommand)* | Same as `wrench deploy` — build and deploy in one step |
-| `wrench dev` | Bump version, run tests (non-blocking), start Vite |
+| `wrench` *(no subcommand)* | Same as `wrench deploy`: build and deploy in one step |
+| `wrench dev` | Bump version, run tests (non-blocking), `npm run dev` |
 | `wrench build [--clean]` | `npm run build`, verify `dist/index.html`, advisory dist-size budget check. `--clean` wipes `dist/` first |
 | `wrench test` | `npm test` |
 | `wrench deploy [--force] [--clean] [--version X.Y.Z]` | Bump version, build, `terraform apply` (idempotent), upload to S3, promote. `--version` sets `version.json` before building, so the build and the S3 prefix agree; `--force` replaces an already-uploaded version |
@@ -210,7 +211,7 @@ wrench deploy
 ## How deploys work
 
 Every deploy uploads the full `dist/` build to
-`s3://<bucket>/versions/<semver>/`, immutable and content-hashed — nothing
+`s3://<bucket>/versions/<semver>/`, immutable and content-hashed. Nothing
 already-deployed is ever overwritten. "Promoting" a version writes a small
 loading-overlay page (spinner + `<iframe src="/versions/<version>/index.html">`)
 to the bucket root and fires a targeted CloudFront invalidation for
@@ -223,7 +224,7 @@ to reach for `--force`. Promoting refuses a version that has no `index.html`,
 so a half-uploaded build cannot become the live site. The bucket is versioned
 with a 30-day window, which is what makes `--force` recoverable.
 
-Rollback is re-promoting an older version — no rebuild, no re-upload:
+Rollback is re-promoting an older version, no rebuild, no re-upload:
 
 ```sh
 wrench promote 1.2.3
